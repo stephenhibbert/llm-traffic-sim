@@ -1,0 +1,4 @@
+python-fasthtml
+fh_frankenui
+fh_matplotlib
+scipy
