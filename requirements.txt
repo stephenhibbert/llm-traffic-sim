@@ -1,4 +1,6 @@
 python-fasthtml
-fh_frankenui
-fh_matplotlib
+numpy
+matplotlib
 scipy
+fh-frankenui
+fh-matplotlib
