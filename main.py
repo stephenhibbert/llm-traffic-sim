@@ -14,7 +14,7 @@ class SimConfig:
     # Traffic Parameters
     active_weekly_customers: int = 10000000
     customer_service_percentage: int = 2
-    staged_rollout_percentage: int = 10
+    staged_rollout_percentage: int = 1
     distribution_variance: float = 0.15
     distribution_samples: int = 10000
     
@@ -26,7 +26,7 @@ class SimConfig:
     input_cost_per_1k: float = 0.003
     output_cost_per_1k: float = 0.015
     tokens_per_minute_limit: int = 200000
-    requests_per_minute_limit: int = 20
+    invoke_model_requests_per_minute_limit: int = 20
     
     # Guardrail Parameters
     input_guardrail_text_units: int = 1  # Text units per input (PII/topics/content) guardrail message (1 unit = 1000 chars)
@@ -40,10 +40,12 @@ class SimConfig:
     contextual_grounding_price_per_1k: float = 0.1
     pii_filter_price_per_1k: float = 0.1    
     
-    # Guardrails limits (per second)
+    # Guardrails limits (text units per second)
     input_guardrail_limit: float = 25
     contextual_grounding_limit: float = 53
-    apply_guardrail_total_limit: float = 25
+    
+    # Guardrails request limit
+    apply_guardrail_per_second_limit: float = 25
 
 
 class SessionState:
@@ -107,9 +109,8 @@ class LLMTrafficSimulator:
         self.mean_turns_per_second = total_turns / (7 * 24 * 60 * 60)
         
         # LLM limits
-        self.max_requests_per_second = self.config.requests_per_minute_limit / 60
-        self.max_input_tokens_per_second = (self.config.tokens_per_minute_limit / 
-                                          self.config.input_tokens_per_message / 60)
+        self.max_requests_per_second = self.config.invoke_model_requests_per_minute_limit / 60
+        self.max_input_tokens_per_second = self.config.tokens_per_minute_limit / 60
         
         
         self.text_units_per_request = {
@@ -123,7 +124,7 @@ class LLMTrafficSimulator:
         self.guardrails_limits = {
             'input_guardrail_limit': self.config.input_guardrail_limit,
             'contextual_grounding': self.config.contextual_grounding_limit,
-            'requests': self.config.apply_guardrail_total_limit
+            'requests': self.config.apply_guardrail_per_second_limit
         }
 
     def generate_traffic(self):
@@ -209,12 +210,12 @@ def create_control_input(name: str, min_val: float, max_val: float,
         'input_cost_per_1k': 'Cost in USD per 1000 input tokens',
         'output_cost_per_1k': 'Cost in USD per 1000 output tokens',
         'tokens_per_minute_limit': 'Maximum tokens allowed per minute by the API',
-        'requests_per_minute_limit': 'Maximum requests allowed per minute by the API',
+        'invoke_model_requests_per_minute_limit': 'Maximum requests allowed per minute by the API',
         
         # Guardrail Parameters
         'input_guardrail_limit': 'Maximum PII/topics/content filter input text units processed per second (1000 chars = 1 text unit)',
         'contextual_grounding_limit': 'Maximum contextual grounding text units processed per second (1000 chars = 1 text unit)',
-        'apply_guardrail_total_limit': 'Maximum guardrails API requests allowed per second',
+        'apply_guardrail_per_second_limit': 'Maximum guardrails API requests allowed per second',
         'input_guardrail_text_units': 'Number of text units per input message (1 text unit = 1000 characters)',
         'output_guardrail_text_units': 'Number of text units per output message (1 text unit = 1000 characters)',
         'content_filter_enabled': 'Content filter enabled (0 = no, 1 = yes)',
@@ -259,173 +260,220 @@ def create_control_input(name: str, min_val: float, max_val: float,
 
 @matplotlib2fasthtml
 def create_traffic_plot(simulator: LLMTrafficSimulator, traffic: np.ndarray, plot_type: str = 'traffic'):
-    def plot_distribution(data, kde, color='skyblue', line_color='r', label=None, alpha=0.7, fill_alpha=0.2):
-        plt.hist(data, bins=50, density=True, alpha=0.7, color=color)
+    def plot_distribution(data, kde, color='skyblue', line_color='r', label=None, alpha=0.7, fill_alpha=0.2, ax=None):
+        if ax is None:
+            ax = plt.gca()
+        ax.hist(data, bins=50, density=True, alpha=0.7, color=color)
         x_range = np.linspace(min(data), max(data), 200)
-        plt.plot(x_range, kde(x_range), color=line_color, lw=2, alpha=alpha, label=label)
-        plt.fill_between(x_range, kde(x_range), alpha=fill_alpha, color=color)
+        ax.plot(x_range, kde(x_range), color=line_color, lw=2, alpha=alpha, label=label)
+        ax.fill_between(x_range, kde(x_range), alpha=fill_alpha, color=color)
         
-    def add_vertical_line(x, color, style, label, alpha=0.7):
-        plt.axvline(x=x, color=color, linestyle=style, alpha=alpha, label=label)
+    def add_vertical_line(x, color, style, label, alpha=0.7, ax=None):
+        if ax is None:
+            ax = plt.gca()
+        ax.axvline(x=x, color=color, linestyle=style, alpha=alpha, label=label)
         
     def calculate_percent_over_limit(data, limit):
         return (np.sum(data > limit) / len(data)) * 100
 
-    if plot_type == 'traffic':
-        fig, ax = plt.subplots(figsize=(12, 6))
-        ax.set_title('User Traffic Distribution')
-        ax.set_xlabel('Requests per Second')
-        ax.set_ylabel('Density')
-        
-        kde = gaussian_kde(traffic)
-        plot_distribution(traffic, kde, label='User Traffic Distribution')
-        add_vertical_line(
-            simulator.mean_turns_per_second, 
-            'g', '--', 
-            f'Mean: {simulator.mean_turns_per_second:.2f}'
-        )
-        
-        ax.set_ylim(bottom=0)
-        ax.legend(loc='upper right', framealpha=0.9)
-        
-    elif plot_type == 'llm':
-        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 10), height_ratios=[1, 1])
-        fig.suptitle('LLM Traffic Distribution')
-        
-        llm_traffic = traffic * simulator.config.calls_per_turn
-        token_traffic = llm_traffic * (simulator.config.input_tokens_per_message + 
-                                    simulator.config.output_tokens_per_message)
-        
-        # Top plot - Request Distribution
-        ax1.set_xlabel('Requests per Second')
-        ax1.set_ylabel('Request Density')
-        
-        kde_llm = gaussian_kde(llm_traffic)
-        x_range = np.linspace(min(llm_traffic), max(llm_traffic), 200)
-        
-        ax1.hist(llm_traffic, bins=50, density=True, alpha=0.7, color='skyblue')
-        ax1.plot(x_range, kde_llm(x_range), color='r', lw=2, label='Requests Traffic Distribution')
-        
-        # Calculate and display percentage over limit
-        pct_over_req = calculate_percent_over_limit(llm_traffic, simulator.max_requests_per_second)
-        ax1.text(0.02, 0.98, f'Requests over limit: {pct_over_req:.1f}%',
-                transform=ax1.transAxes, verticalalignment='top',
-                bbox=dict(facecolor='white', alpha=0.8))
-        
-        ax1.axvline(x=simulator.mean_requests_per_second, color='g', linestyle='--',
-                    label=f'Request Mean: {simulator.mean_requests_per_second:.2f}')
-        ax1.axvline(x=simulator.max_requests_per_second, color='orange', linestyle='-',
-                    label=f'Request Rate Limit: {simulator.max_requests_per_second:.2f}')
-        
-        ax1.set_ylim(bottom=0)
-        ax1.legend(loc='upper right', framealpha=0.9)
-        
-        # Bottom plot - Token Distribution
-        ax2.set_xlabel('Tokens per Second')
-        ax2.set_ylabel('Token Density')
-        
-        kde_tokens = gaussian_kde(token_traffic)
-        token_range = np.linspace(min(token_traffic), max(token_traffic), 200)
-        
-        ax2.hist(token_traffic, bins=50, density=True, alpha=0.7, color='lavender')
-        ax2.plot(token_range, kde_tokens(token_range), color='purple', lw=2, 
-                label='Token Traffic Distribution')
-        
-        # Calculate and display percentage over limit
-        pct_over_token = calculate_percent_over_limit(token_traffic, simulator.max_input_tokens_per_second)
-        ax2.text(0.02, 0.98, f'Tokens over limit: {pct_over_token:.1f}%',
-                transform=ax2.transAxes, verticalalignment='top',
-                bbox=dict(facecolor='white', alpha=0.8))
-        
-        token_mean = simulator.mean_requests_per_second * (simulator.config.input_tokens_per_message + 
-                                                        simulator.config.output_tokens_per_message)
-        ax2.axvline(x=token_mean, color='purple', linestyle='--',
-                    label=f'Token Mean: {token_mean:.0f}')
-        ax2.axvline(x=simulator.max_input_tokens_per_second, color='pink', linestyle='-',
-                    label=f'Token Rate Limit: {simulator.max_input_tokens_per_second:.0f}')
-        
-        ax2.set_ylim(bottom=0)
-        ax2.legend(loc='upper right', framealpha=0.9)
-        
-        plt.tight_layout()
-        
-    elif plot_type == 'guardrails':
-        fig, ax = plt.subplots(figsize=(12, 6))
-        ax.set_title('Guardrails Text Units Distribution')
-        ax.set_xlabel('Requests per Second')
-        ax.set_ylabel('Density')
-        
-        input_traffic = np.zeros_like(traffic)
-        if simulator.config.content_filter_enabled:
-            input_traffic += traffic * simulator.config.input_guardrail_text_units
-        if simulator.config.denied_topics_enabled:
-            input_traffic += traffic * simulator.config.input_guardrail_text_units  
-        if simulator.config.pii_filter_enabled:
-            input_traffic += traffic * simulator.config.input_guardrail_text_units
+    # Initialize figure to handle default case
+    fig = None
 
-        output_traffic = np.zeros_like(traffic)
-        if simulator.config.contextual_grounding_enabled:
-            output_traffic = traffic * simulator.config.output_guardrail_text_units
-        total_traffic = input_traffic + output_traffic
+    try:
+        if plot_type == 'traffic':
+            fig, ax = plt.subplots(figsize=(12, 6))
+            ax.set_title('User Traffic Distribution')
+            ax.set_xlabel('Requests per Second')
+            ax.set_ylabel('Density')
+            
+            kde = gaussian_kde(traffic)
+            plot_distribution(traffic, kde, label='User Traffic Distribution', ax=ax)
+            add_vertical_line(
+                simulator.mean_turns_per_second, 
+                'g', '--', 
+                f'Mean: {simulator.mean_turns_per_second:.2f}',
+                ax=ax
+            )
+            
+            ax.set_ylim(bottom=0)
+            ax.legend(loc='upper right', framealpha=0.9)
+            
+        elif plot_type == 'llm':
+            fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 10), height_ratios=[1, 1])
+            fig.suptitle('LLM Traffic Distribution')
+
+            llm_traffic = traffic * simulator.config.calls_per_turn
+            token_traffic = llm_traffic * (simulator.config.input_tokens_per_message + 
+                                        simulator.config.output_tokens_per_message)
+
+            # Top plot - Request Distribution
+            ax1.set_xlabel('Requests per Second')
+            ax1.set_ylabel('Request Density')
+
+            kde_llm = gaussian_kde(llm_traffic)
+            x_range = np.linspace(min(llm_traffic), max(llm_traffic), 200)
+
+            ax1.hist(llm_traffic, bins=50, density=True, alpha=0.7, color='skyblue')
+            ax1.plot(x_range, kde_llm(x_range), color='r', lw=2, label='Requests Traffic Distribution')
+
+            # Calculate and display percentage over limit
+            pct_over_req = calculate_percent_over_limit(llm_traffic, simulator.max_requests_per_second)
+            ax1.text(0.02, 0.98, f'Requests over limit: {pct_over_req:.1f}%',
+                    transform=ax1.transAxes, verticalalignment='top',
+                    bbox=dict(facecolor='white', alpha=0.8))
+
+            ax1.axvline(x=simulator.mean_requests_per_second, color='g', linestyle='--',
+                        label=f'Request Mean: {simulator.mean_requests_per_second:.2f}')
+            ax1.axvline(x=simulator.max_requests_per_second, color='orange', linestyle='-',
+                        label=f'Request Rate Limit: {simulator.max_requests_per_second:.2f}')
+
+            ax1.set_ylim(bottom=0)
+            ax1.legend(loc='upper right', framealpha=0.9)
+
+            # Bottom plot - Token Distribution
+            ax2.set_xlabel('Tokens per Second')
+            ax2.set_ylabel('Token Density')
+
+            kde_tokens = gaussian_kde(token_traffic)
+            token_range = np.linspace(min(token_traffic), max(token_traffic), 200)
+
+            ax2.hist(token_traffic, bins=50, density=True, alpha=0.7, color='lavender')
+            ax2.plot(token_range, kde_tokens(token_range), color='purple', lw=2, 
+                    label='Token Traffic Distribution')
+
+            # Calculate and display percentage over limit
+            pct_over_token = calculate_percent_over_limit(token_traffic, simulator.max_input_tokens_per_second)
+            ax2.text(0.02, 0.98, f'Tokens over limit: {pct_over_token:.1f}%',
+                    transform=ax2.transAxes, verticalalignment='top',
+                    bbox=dict(facecolor='white', alpha=0.8))
+
+            token_mean = simulator.mean_requests_per_second * (simulator.config.input_tokens_per_message + 
+                                                            simulator.config.output_tokens_per_message)
+            ax2.axvline(x=token_mean, color='purple', linestyle='--',
+                        label=f'Token Mean: {token_mean:.0f}')
+            ax2.axvline(x=simulator.max_input_tokens_per_second, color='pink', linestyle='-',
+                        label=f'Token Rate Limit: {simulator.max_input_tokens_per_second:.0f}')
+
+            ax2.set_ylim(bottom=0)
+            ax2.legend(loc='upper right', framealpha=0.9)
+
+            plt.tight_layout()
+            
+        elif plot_type == 'guardrails':
+            # Create two subplots: one for text units, one for requests
+            fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 10))
+            
+            # Calculate traffic for text units
+            input_traffic = np.zeros_like(traffic)
+            if simulator.config.content_filter_enabled:
+                input_traffic += traffic * simulator.config.input_guardrail_text_units
+            if simulator.config.denied_topics_enabled:
+                input_traffic += traffic * simulator.config.input_guardrail_text_units  
+            if simulator.config.pii_filter_enabled:
+                input_traffic += traffic * simulator.config.input_guardrail_text_units
+
+            output_traffic = np.zeros_like(traffic)
+            if simulator.config.contextual_grounding_enabled:
+                output_traffic = traffic * simulator.config.output_guardrail_text_units
+            total_traffic = input_traffic + output_traffic
+            
+            # Text Units Distribution (top plot)
+            ax1.set_title('Text Units Distribution')
+            ax1.set_xlabel('Text Units per Second')
+            ax1.set_ylabel('Density')
+            
+            # Only calculate KDE if we have non-zero data
+            if np.any(input_traffic):
+                kde_input = gaussian_kde(input_traffic)
+            if np.any(output_traffic):
+                kde_output = gaussian_kde(output_traffic)
+            if np.any(total_traffic):
+                kde_total = gaussian_kde(total_traffic)
+            
+            input_mean = simulator.mean_turns_per_second * simulator.config.input_guardrail_text_units
+            output_mean = simulator.mean_turns_per_second * simulator.config.output_guardrail_text_units
+            total_mean = input_mean + output_mean
+            
+            input_limit = simulator.config.input_guardrail_limit
+            output_limit = simulator.config.contextual_grounding_limit
+            
+            # Calculate percentages over limits for text units if we have data
+            if np.any(input_traffic):
+                pct_over_input = calculate_percent_over_limit(input_traffic, input_limit)
+                ax1.text(0.02, 0.93, f'Input over limit: {pct_over_input:.1f}%',
+                        transform=ax1.transAxes, verticalalignment='top',
+                        bbox=dict(facecolor='white', alpha=0.8))
+                        
+            if np.any(output_traffic):
+                pct_over_output = calculate_percent_over_limit(output_traffic, output_limit)
+                ax1.text(0.02, 0.88, f'Output over limit: {pct_over_output:.1f}%',
+                        transform=ax1.transAxes, verticalalignment='top',
+                        bbox=dict(facecolor='white', alpha=0.8))
+            
+            # Plot distributions only if we have data
+            if np.any(input_traffic):
+                ax1.hist(input_traffic, bins=50, density=True, alpha=0.7, color='#8B5CF6')
+                x_range = np.linspace(min(input_traffic), max(input_traffic), 200)
+                ax1.plot(x_range, kde_input(x_range), color='#6D28D9', lw=2, label='Input Text Units')
+                ax1.axvline(x=input_mean, color='#6D28D9', linestyle='--', 
+                          label=f'Input Mean: {input_mean:.2f}')
+                ax1.axvline(x=input_limit, color='#4C1D95', linestyle='-',
+                          label=f'Input Limit: {input_limit}')
+                
+            if np.any(output_traffic):
+                ax1.hist(output_traffic, bins=50, density=True, alpha=0.7, color='#2DD4BF')
+                x_range = np.linspace(min(output_traffic), max(output_traffic), 200)
+                ax1.plot(x_range, kde_output(x_range), color='#0D9488', lw=2, label='Output Text Units')
+                ax1.axvline(x=output_mean, color='#0D9488', linestyle='--',
+                          label=f'Output Mean: {output_mean:.2f}')
+                ax1.axvline(x=output_limit, color='#134E4A', linestyle='-',
+                          label=f'Output Limit: {output_limit}')
+                
+            ax1.set_ylim(bottom=0)
+            ax1.legend(loc='upper right', framealpha=0.9)
+            
+            # Requests Distribution (bottom plot)
+            ax2.set_title('Requests Distribution')
+            ax2.set_xlabel('Requests per Second')
+            ax2.set_ylabel('Density')
+            
+            # Plot request distribution
+            kde_requests = gaussian_kde(traffic)
+            plot_distribution(traffic, kde_requests, color='#94A3B8', line_color='#64748B',
+                            label='Request Distribution', ax=ax2)
+            
+            request_mean = simulator.mean_turns_per_second
+            request_limit = simulator.config.apply_guardrail_per_second_limit
+            
+            # Calculate percentage over limit for requests
+            pct_over_requests = calculate_percent_over_limit(traffic, request_limit)
+            
+            # Add text for percentage on requests plot
+            ax2.text(0.02, 0.98, f'Requests over limit: {pct_over_requests:.1f}%',
+                    transform=ax2.transAxes, verticalalignment='top',
+                    bbox=dict(facecolor='white', alpha=0.8))
+            
+            # Add mean and limit lines for requests
+            add_vertical_line(request_mean, '#64748B', '--', 
+                            f'Request Mean: {request_mean:.2f}', ax=ax2)
+            add_vertical_line(request_limit, '#475569', '-',
+                            f'Request Limit: {request_limit}', ax=ax2)
+            
+            ax2.set_ylim(bottom=0)
+            ax2.legend(loc='upper right', framealpha=0.9)
+            
+            plt.tight_layout()
+        else:
+            # Handle unknown plot type
+            fig, ax = plt.subplots(figsize=(12, 6))
+            ax.text(0.5, 0.5, f'Unknown plot type: {plot_type}', ha='center', va='center')
+            
+    except Exception as e:
+        # Create an error figure if something goes wrong
+        fig, ax = plt.subplots(figsize=(12, 6))
+        ax.text(0.5, 0.5, f'Error creating plot: {str(e)}', ha='center', va='center')
         
-        kde_input = gaussian_kde(input_traffic)
-        kde_output = gaussian_kde(output_traffic)
-        kde_total = gaussian_kde(total_traffic)
-        
-        input_mean = simulator.mean_turns_per_second * simulator.config.input_guardrail_text_units
-        output_mean = simulator.mean_turns_per_second * simulator.config.output_guardrail_text_units
-        total_mean = input_mean + output_mean
-        
-        input_limit = simulator.config.input_guardrail_limit
-        output_limit = simulator.config.contextual_grounding_limit
-        total_limit = simulator.config.apply_guardrail_total_limit
-        
-        # Calculate percentages over limits
-        pct_over_input = calculate_percent_over_limit(input_traffic, input_limit)
-        pct_over_output = calculate_percent_over_limit(output_traffic, output_limit)
-        pct_over_total = calculate_percent_over_limit(total_traffic, total_limit)
-        
-        # Add text for percentages
-        y_pos = 0.98
-        ax.text(0.02, y_pos, f'Total over limit: {pct_over_total:.1f}%',
-                transform=ax.transAxes, verticalalignment='top',
-                bbox=dict(facecolor='white', alpha=0.8))
-        ax.text(0.02, y_pos-0.05, f'Input over limit: {pct_over_input:.1f}%',
-                transform=ax.transAxes, verticalalignment='top',
-                bbox=dict(facecolor='white', alpha=0.8))
-        ax.text(0.02, y_pos-0.10, f'Output over limit: {pct_over_output:.1f}%',
-                transform=ax.transAxes, verticalalignment='top',
-                bbox=dict(facecolor='white', alpha=0.8))
-        
-        all_vals = np.concatenate([input_traffic, output_traffic, total_traffic, 
-                                 [input_mean, output_mean, total_mean,
-                                  input_limit, output_limit, total_limit]])
-        x_min, x_max = np.min(all_vals), np.max(all_vals)
-        x_range = np.linspace(x_min, x_max, 200)
-        
-        plot_distribution(total_traffic, kde_total, color='#94A3B8', line_color='#94A3B8', 
-                        label='Total Text Units', alpha=0.7, fill_alpha=0.1)
-        add_vertical_line(total_mean, '#64748B', '--', f'Total Text Units Mean: {total_mean:.2f}')
-        add_vertical_line(total_limit, '#334155', '-', f'Total Text Units Limit: {total_limit}')
-        
-        plot_distribution(input_traffic, kde_input, color='#8B5CF6', line_color='#8B5CF6',
-                        label='Input Text Units', alpha=0.7, fill_alpha=0.2)
-        add_vertical_line(input_mean, '#6D28D9', '--', f'Input Text Units Mean: {input_mean:.2f}')
-        add_vertical_line(input_limit, '#4C1D95', '-', f'Input Text Units Limit: {input_limit}')
-        
-        plot_distribution(output_traffic, kde_output, color='#2DD4BF', line_color='#2DD4BF',
-                        label='Output Text Units', alpha=0.7, fill_alpha=0.2)
-        add_vertical_line(output_mean, '#0D9488', '--', f'Output Text Units Mean: {output_mean:.2f}')
-        add_vertical_line(output_limit, '#134E4A', '-', f'Output Text Units Limit: {output_limit}')
-        
-        x_padding = (x_max - x_min) * 0.05
-        ax.set_xlim(x_min - x_padding, x_max + x_padding)
-        ax.set_ylim(bottom=0)
-        
-        ax.legend(loc='upper right', framealpha=0.9)
-    
     return fig
-
 
 def create_metrics_grid(analysis: dict, metrics_type: str = 'traffic', config=None):
     metrics = []
@@ -499,7 +547,7 @@ def create_tab_controls(state, tab_type: str):
         ("input_cost_per_1k", 0.001, 0.01, state.config.input_cost_per_1k, 0.001),
         ("output_cost_per_1k", 0.001, 0.05, state.config.output_cost_per_1k, 0.001),
         ("tokens_per_minute_limit", 50000, 1000000, state.config.tokens_per_minute_limit, 10000),
-        ("requests_per_minute_limit", 1, 300, state.config.requests_per_minute_limit, 20),
+        ("invoke_model_requests_per_minute_limit", 1, 300, state.config.invoke_model_requests_per_minute_limit, 20),
     ]
     
     GUARDRAILS_CONTROLS = [
@@ -507,7 +555,7 @@ def create_tab_controls(state, tab_type: str):
         ("output_guardrail_text_units", 1, 110, state.config.output_guardrail_text_units, 1),
         ("input_guardrail_limit", 1, 100, state.config.input_guardrail_limit, 1),
         ("contextual_grounding_limit", 1, 200, state.config.contextual_grounding_limit, 1),
-        ("apply_guardrail_total_limit", 1, 100, state.config.apply_guardrail_total_limit, 1),
+        ("apply_guardrail_per_second_limit", 1, 100, state.config.apply_guardrail_per_second_limit, 1),
         
         ("content_filter_enabled", 0, 1, state.config.content_filter_enabled, 1),
         ("denied_topics_enabled", 0, 1, state.config.denied_topics_enabled, 1),
@@ -601,7 +649,7 @@ async def post(request, session):
     elif any(field in form for field in [
         'human_turns_per_conversation', 'calls_per_turn', 'input_tokens_per_message',
         'output_tokens_per_message', 'input_cost_per_1k', 'output_cost_per_1k',
-        'tokens_per_minute_limit', 'requests_per_minute_limit'
+        'tokens_per_minute_limit', 'invoke_model_requests_per_minute_limit'
     ]):
         return get_results_content(state, 'llm')
     else:
