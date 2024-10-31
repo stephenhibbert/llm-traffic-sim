@@ -303,8 +303,7 @@ def create_traffic_plot(simulator: LLMTrafficSimulator, traffic: np.ndarray, plo
             fig.suptitle('LLM Traffic Distribution')
 
             llm_traffic = traffic * simulator.config.calls_per_turn
-            token_traffic = llm_traffic * (simulator.config.input_tokens_per_message + 
-                                        simulator.config.output_tokens_per_message)
+            input_token_traffic = llm_traffic * simulator.config.input_tokens_per_message
 
             # Top plot - Request Distribution
             ax1.set_xlabel('Requests per Second')
@@ -330,29 +329,29 @@ def create_traffic_plot(simulator: LLMTrafficSimulator, traffic: np.ndarray, plo
             ax1.set_ylim(bottom=0)
             ax1.legend(loc='upper right', framealpha=0.9)
 
-            # Bottom plot - Token Distribution
-            ax2.set_xlabel('Tokens per Second')
-            ax2.set_ylabel('Token Density')
+            # Bottom plot - Input Token Distribution
+            ax2.set_xlabel('Input Tokens per Second')
+            ax2.set_ylabel('Input Token Density')
 
-            kde_tokens = gaussian_kde(token_traffic)
-            token_range = np.linspace(min(token_traffic), max(token_traffic), 200)
+            kde_tokens = gaussian_kde(input_token_traffic)
+            token_range = np.linspace(min(input_token_traffic), max(input_token_traffic), 200)
 
-            ax2.hist(token_traffic, bins=50, density=True, alpha=0.7, color='lavender')
+            ax2.hist(input_token_traffic, bins=50, density=True, alpha=0.7, color='lavender')
             ax2.plot(token_range, kde_tokens(token_range), color='purple', lw=2, 
-                    label='Token Traffic Distribution')
+                    label='Input Token Traffic Distribution')
 
             # Calculate and display percentage over limit
-            pct_over_token = calculate_percent_over_limit(token_traffic, simulator.max_input_tokens_per_second)
-            ax2.text(0.02, 0.98, f'Tokens over limit: {pct_over_token:.1f}%',
+            pct_over_token = calculate_percent_over_limit(input_token_traffic, simulator.max_input_tokens_per_second)
+            ax2.text(0.02, 0.98, f'Input tokens over limit: {pct_over_token:.1f}%',
                     transform=ax2.transAxes, verticalalignment='top',
                     bbox=dict(facecolor='white', alpha=0.8))
 
-            token_mean = simulator.mean_requests_per_second * (simulator.config.input_tokens_per_message + 
-                                                            simulator.config.output_tokens_per_message)
-            ax2.axvline(x=token_mean, color='purple', linestyle='--',
-                        label=f'Token Mean: {token_mean:.0f}')
+            input_token_mean = simulator.mean_requests_per_second * simulator.config.input_tokens_per_message
+            
+            ax2.axvline(x=input_token_mean, color='purple', linestyle='--',
+                        label=f'Input Token Mean: {input_token_mean:.0f}')
             ax2.axvline(x=simulator.max_input_tokens_per_second, color='pink', linestyle='-',
-                        label=f'Token Rate Limit: {simulator.max_input_tokens_per_second:.0f}')
+                        label=f'Input Token Rate Limit: {simulator.max_input_tokens_per_second:.0f}')
 
             ax2.set_ylim(bottom=0)
             ax2.legend(loc='upper right', framealpha=0.9)
@@ -387,12 +386,9 @@ def create_traffic_plot(simulator: LLMTrafficSimulator, traffic: np.ndarray, plo
                 kde_input = gaussian_kde(input_traffic)
             if np.any(output_traffic):
                 kde_output = gaussian_kde(output_traffic)
-            if np.any(total_traffic):
-                kde_total = gaussian_kde(total_traffic)
             
             input_mean = simulator.mean_turns_per_second * simulator.config.input_guardrail_text_units
             output_mean = simulator.mean_turns_per_second * simulator.config.output_guardrail_text_units
-            total_mean = input_mean + output_mean
             
             input_limit = simulator.config.input_guardrail_limit
             output_limit = simulator.config.contextual_grounding_limit
@@ -542,8 +538,8 @@ def create_tab_controls(state, tab_type: str):
     LLM_CONTROLS = [
         ("human_turns_per_conversation", 1, 20, state.config.human_turns_per_conversation, 1),
         ("calls_per_turn", 1, 10, state.config.calls_per_turn, 1),
-        ("input_tokens_per_message", 50, 1000, state.config.input_tokens_per_message, 10),
-        ("output_tokens_per_message", 10, 1000, state.config.output_tokens_per_message, 10),
+        ("input_tokens_per_message", 20, 1000, state.config.input_tokens_per_message, 10),
+        ("output_tokens_per_message", 100, 1000, state.config.output_tokens_per_message, 10),
         ("input_cost_per_1k", 0.001, 0.01, state.config.input_cost_per_1k, 0.001),
         ("output_cost_per_1k", 0.001, 0.05, state.config.output_cost_per_1k, 0.001),
         ("tokens_per_minute_limit", 50000, 1000000, state.config.tokens_per_minute_limit, 10000),
