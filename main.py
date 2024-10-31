@@ -671,19 +671,33 @@ def get(session):
         
     content = Container(
             Card(
-            P("Simulate application traffic patterns and service costs/limits with Amazon Bedrock."),
-            P(
-                "Numbers correct on 31/10/2024 - please check here for latest: ",
-                A("AWS Bedrock Documentation", 
-                href="https://docs.aws.amazon.com/general/latest/gr/bedrock.html",
-                target="_blank",
-                rel="noopener noreferrer")
+                P("Simulate application traffic patterns and service costs/limits with Amazon Bedrock."),
+                P(
+                    "Numbers correct on 31/10/2024 - please check here for latest: ",
+                    A("AWS Bedrock Documentation", 
+                    href="https://docs.aws.amazon.com/general/latest/gr/bedrock.html",
+                    target="_blank",
+                    rel="noopener noreferrer",
+                    cls="text-blue-600 hover:text-blue-800 hover:underline transition-colors duration-200")
+                ),
+                P(
+                    "Spotted a mistake? Please raise an issue on ",
+                    A("Github",
+                    href="https://github.com/stephenhibbert/llm-traffic-sim",
+                    target="_blank",
+                    rel="noopener noreferrer",
+                    cls="text-blue-600 hover:text-blue-800 hover:underline transition-colors duration-200")
+                ),
+                header=H1("Amazon Bedrock App Traffic Simulator", 
+                        cls="text-4xl text-gray-200 mt-1"),
+                footer=Div(
+                    Button("Reset to Defaults", 
+                        cls="bg-red-500 hover:bg-red-700 text-white font-bold py-2 px-4 rounded transition-colors duration-200",
+                        hx_get="/reset", 
+                        hx_target="body")
+                ),
+                cls="not-prose w-full mb-4"
             ),
-            header=H1("Amazon Bedrock App Traffic Simulator", cls="text-4xl text-gray-200 mt-1"),
-            footer=Div(Button("Reset to Defaults", cls="bg-red-500 hover:bg-red-700 text-white font-bold py-2 px-4 rounded",
-                         hx_get="/reset", hx_target="body")),
-            cls="not-prose w-full mb-4"
-        ),
         Div(
             Div(cls="flex border-b border-gray-200")(
                 A("Traffic", cls="px-4 py-2 hover:bg-gray-100", 
