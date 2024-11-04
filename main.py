@@ -21,8 +21,8 @@ class SimConfig:
     # LLM Parameters
     human_turns_per_conversation: int = 5
     calls_per_turn: int = 3
-    input_tokens_per_message: int = 100
-    output_tokens_per_message: int = 20
+    input_tokens_per_message: int = 20
+    output_tokens_per_message: int = 100
     input_cost_per_1k: float = 0.003
     output_cost_per_1k: float = 0.015
     tokens_per_minute_limit: int = 200000
