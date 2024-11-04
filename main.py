@@ -96,100 +96,163 @@ class LLMTrafficSimulator:
     def __init__(self, config: SimConfig):
         self.config = config
         self._calculate_base_metrics()
-    
+        self.traffic = self.generate_traffic_distribution(self.mean_conversations_per_second)
+
     def _calculate_base_metrics(self):
-        # Existing metrics calculation...
+        """Calculate all core metrics used throughout the simulator"""
+        # Base conversation metrics
         weekly_cs_contacts = (self.config.active_weekly_customers * 
                             (self.config.customer_service_percentage / 100))
         self.conversations_per_week = weekly_cs_contacts * (self.config.staged_rollout_percentage / 100)
+        self.mean_conversations_per_second = self.conversations_per_week / (7 * 24 * 60 * 60)
+
+        # LLM metrics
+        self.llm_multiplier = self.config.human_turns_per_conversation * self.config.calls_per_turn
+        self.mean_llm_requests_per_second = self.mean_conversations_per_second * self.llm_multiplier
+        self.mean_input_tokens_per_second = self.mean_llm_requests_per_second * self.config.input_tokens_per_message
         
-        total_turns = self.conversations_per_week * self.config.human_turns_per_conversation
-        total_requests = total_turns * self.config.calls_per_turn
-        self.mean_requests_per_second = total_requests / (7 * 24 * 60 * 60)
-        self.mean_turns_per_second = total_turns / (7 * 24 * 60 * 60)
-        
-        # LLM limits
+        # API Limits
         self.max_requests_per_second = self.config.invoke_model_requests_per_minute_limit / 60
         self.max_input_tokens_per_second = self.config.tokens_per_minute_limit / 60
-        
-        
-        self.text_units_per_request = {
-            'content_filter': self.config.input_guardrail_text_units,
-            'denied_topics': self.config.input_guardrail_text_units,
-            'pii_filter': self.config.input_guardrail_text_units,
-            'contextual_grounding': self.config.output_guardrail_text_units
-        }
-            
-        # Store limits for plotting
-        self.guardrails_limits = {
-            'input_guardrail_limit': self.config.input_guardrail_limit,
-            'contextual_grounding': self.config.contextual_grounding_limit,
-            'requests': self.config.apply_guardrail_per_second_limit
-        }
 
-    def generate_traffic(self):
-        np.random.seed(42)
-        return np.random.normal(
-            self.mean_turns_per_second,
-            self.mean_turns_per_second * self.config.distribution_variance,
-            int(self.config.distribution_samples)
-        )
-    
-    def _calculate_costs(self, requests_per_week):
-        total_input_tokens = requests_per_week * self.config.input_tokens_per_message
-        total_output_tokens = requests_per_week * self.config.output_tokens_per_message
+        # Guardrails counts
+        self.enabled_input_guardrails = sum([
+            bool(self.config.content_filter_enabled),
+            bool(self.config.denied_topics_enabled),
+            bool(self.config.pii_filter_enabled)
+        ])
+        self.enabled_output_guardrails = bool(self.config.contextual_grounding_enabled)
+        self.total_enabled_guardrails = self.enabled_input_guardrails + self.enabled_output_guardrails
+
+        # Guardrails multipliers
+        self.input_guardrail_multiplier = (self.config.human_turns_per_conversation * 
+                                         self.config.input_guardrail_text_units * 
+                                         self.enabled_input_guardrails)
+        self.output_guardrail_multiplier = (self.config.human_turns_per_conversation * 
+                                          self.config.output_guardrail_text_units * 
+                                          self.enabled_output_guardrails)
+        
+        # Weekly metrics (for cost calculations)
+        self.weekly_llm_requests = self.conversations_per_week * self.llm_multiplier
+        self.weekly_guardrails_requests = self.conversations_per_week * self.config.human_turns_per_conversation * self.total_enabled_guardrails
+
+    def _calculate_llm_costs(self):
+        """Calculate LLM-related costs"""
+        total_input_tokens = self.weekly_llm_requests * self.config.input_tokens_per_message
+        total_output_tokens = self.weekly_llm_requests * self.config.output_tokens_per_message
         
         return ((total_input_tokens / 1000) * self.config.input_cost_per_1k +
                 (total_output_tokens / 1000) * self.config.output_cost_per_1k)
-    
-    def _calculate_text_units(self, requests_per_week):
-        text_units = {}
-        for guardrail, text_units_per_request in self.text_units_per_request.items():
-            if getattr(self.config, f"{guardrail}_enabled", 1):
-                text_units[guardrail] = requests_per_week * max(text_units_per_request, 1)
-        return text_units
 
-    def _calculate_guardrails_costs(self, requests_per_week):
-        # Pricing per 1000 text units
-        prices = {
-            'content_filter': self.config.content_filter_price_per_1k,
-            'denied_topics': self.config.denied_topics_price_per_1k,
-            'contextual_grounding': self.config.contextual_grounding_price_per_1k,
-            'pii_filter': self.config.pii_filter_price_per_1k
-        }
-        
-        total_cost = 0
-        costs_breakdown = {}
-        text_units = self._calculate_text_units(requests_per_week)
-        
-        for guardrail, price in prices.items():
-            if guardrail in text_units:
-                cost = (text_units[guardrail] / 1000) * price
-                total_cost += cost
-                costs_breakdown[guardrail] = cost
-            else:
-                costs_breakdown[guardrail] = 0
-        
-        return total_cost, costs_breakdown
-
-    def analyze_traffic(self, distribution):
-        weekly_requests = np.mean(distribution) * (7 * 24 * 60 * 60)
-        weekly_llm_requests = weekly_requests * self.config.calls_per_turn * self.config.human_turns_per_conversation
-        llm_cost = self._calculate_costs(weekly_llm_requests)
-        text_units = self._calculate_text_units(weekly_requests)
-        guardrails_cost, guardrails_breakdown = self._calculate_guardrails_costs(weekly_requests)
+    def _calculate_guardrails_costs(self):
+        """Calculate costs for each guardrail service"""
+        requests_per_guardrail = self.weekly_guardrails_requests / self.total_enabled_guardrails
         
         return {
-            'weekly_requests': weekly_requests,
-            'weekly_llm_requests': weekly_llm_requests,
-            'weekly_llm_cost': llm_cost,
-            'weekly_guardrails_cost': guardrails_cost,
-            'guardrails_breakdown': guardrails_breakdown,
-            'text_units': text_units,
-            'monthly_llm_cost': llm_cost * 4.33,
-            'monthly_guardrails_cost': guardrails_cost * 4.33,
-            'llm_cost_per_conversation': llm_cost / self.conversations_per_week,
-            'guardrails_cost_per_conversation': guardrails_cost / self.conversations_per_week,
+            'content_filter': (requests_per_guardrail * self.config.input_guardrail_text_units / 1000 * 
+                            self.config.content_filter_price_per_1k * self.config.content_filter_enabled),
+            'denied_topics': (requests_per_guardrail * self.config.input_guardrail_text_units / 1000 * 
+                            self.config.denied_topics_price_per_1k * self.config.denied_topics_enabled),
+            'pii_filter': (requests_per_guardrail * self.config.input_guardrail_text_units / 1000 * 
+                        self.config.pii_filter_price_per_1k * self.config.pii_filter_enabled),
+            'contextual_grounding': (requests_per_guardrail * self.config.output_guardrail_text_units / 1000 * 
+                                self.config.contextual_grounding_price_per_1k * self.config.contextual_grounding_enabled)
+        }
+
+    def _calculate_text_units(self):
+        """Calculate weekly text units for each service"""
+        return {
+            name: (self.weekly_guardrails_requests / self.total_enabled_guardrails) * (
+                self.config.input_guardrail_text_units if 'grounding' not in name 
+                else self.config.output_guardrail_text_units
+            ) * bool(enabled)
+            for name, enabled in {
+                'content_filter': self.config.content_filter_enabled,
+                'denied_topics': self.config.denied_topics_enabled,
+                'pii_filter': self.config.pii_filter_enabled,
+                'contextual_grounding': self.config.contextual_grounding_enabled
+            }.items()
+        }
+
+    def generate_traffic_distribution(self, base_traffic, multiplier=1):
+        """Generate a traffic distribution with the configured variance"""
+        scaled_traffic = base_traffic * multiplier
+        return np.random.normal(
+            scaled_traffic,
+            scaled_traffic * self.config.distribution_variance,
+            int(self.config.distribution_samples)
+        )
+
+    def generate_traffic(self):
+        """Backward compatibility method"""
+        return self.traffic
+    
+    def get_traffic_metrics(self, traffic_type='all'):
+        """Get all traffic metrics for plotting"""
+        metrics = {
+            'conversation': {
+                'distribution': self.generate_traffic_distribution(self.mean_conversations_per_second),
+                'mean': self.mean_conversations_per_second,
+                'limit': None
+            },
+            'llm_requests': {
+                'distribution': self.generate_traffic_distribution(self.mean_conversations_per_second, self.llm_multiplier),
+                'mean': self.mean_llm_requests_per_second,
+                'limit': self.max_requests_per_second
+            },
+            'input_tokens': {
+                'distribution': self.generate_traffic_distribution(self.mean_conversations_per_second, 
+                    self.llm_multiplier * self.config.input_tokens_per_message),
+                'mean': self.mean_input_tokens_per_second,
+                'limit': self.max_input_tokens_per_second
+            },
+            'guardrails': {
+                'input': {
+                    'distribution': np.zeros(self.config.distribution_samples) if not self.enabled_input_guardrails else
+                        self.generate_traffic_distribution(self.mean_conversations_per_second, self.input_guardrail_multiplier),
+                    'mean': self.mean_conversations_per_second * self.input_guardrail_multiplier,
+                    'limit': self.config.input_guardrail_limit
+                },
+                'output': {
+                    'distribution': np.zeros(self.config.distribution_samples) if not self.enabled_output_guardrails else
+                        self.generate_traffic_distribution(self.mean_conversations_per_second, self.output_guardrail_multiplier),
+                    'mean': self.mean_conversations_per_second * self.output_guardrail_multiplier,
+                    'limit': self.config.contextual_grounding_limit
+                },
+                'requests': {
+                    'distribution': np.zeros(self.config.distribution_samples) if not self.total_enabled_guardrails else
+                        self.generate_traffic_distribution(
+                            self.mean_conversations_per_second,
+                            self.config.human_turns_per_conversation * self.total_enabled_guardrails
+                        ),
+                    'mean': self.mean_conversations_per_second * self.config.human_turns_per_conversation * self.total_enabled_guardrails,
+                    'limit': self.config.apply_guardrail_per_second_limit
+                }
+            }
+        }
+
+        if traffic_type != 'all':
+            return metrics.get(traffic_type, {})
+        return metrics
+
+    def analyze_traffic(self):
+        """Calculate costs and other metrics"""
+        weekly_llm_cost = self._calculate_llm_costs()
+        guardrails_costs = self._calculate_guardrails_costs()
+        weekly_guardrails_cost = sum(guardrails_costs.values())
+
+        return {
+            'weekly_conversations': self.conversations_per_week,
+            'weekly_llm_requests': self.weekly_llm_requests,
+            'weekly_guardrails_requests': self.weekly_guardrails_requests,
+            'weekly_llm_cost': weekly_llm_cost,
+            'weekly_guardrails_cost': weekly_guardrails_cost,
+            'monthly_llm_cost': weekly_llm_cost * 4.33,
+            'monthly_guardrails_cost': weekly_guardrails_cost * 4.33,
+            'llm_cost_per_conversation': weekly_llm_cost / self.conversations_per_week,
+            'guardrails_cost_per_conversation': weekly_guardrails_cost / self.conversations_per_week,
+            'guardrails_breakdown': guardrails_costs,
+            'text_units': self._calculate_text_units()
         }
 
 def create_control_input(name: str, min_val: float, max_val: float, 
@@ -260,226 +323,150 @@ def create_control_input(name: str, min_val: float, max_val: float,
         style="margin-bottom: 0.75rem;"
     )
 
-@matplotlib2fasthtml
-def create_traffic_plot(simulator: LLMTrafficSimulator, traffic: np.ndarray, plot_type: str = 'traffic'):
-    def plot_distribution(data, kde, color='skyblue', line_color='r', label=None, alpha=0.7, fill_alpha=0.2, ax=None):
-        if ax is None:
-            ax = plt.gca()
-        ax.hist(data, bins=50, density=True, alpha=0.7, color=color)
+def plot_multiple_distributions(metrics_list, ax, labels=None, title=None, xlabel=None):
+    # Check if we have any non-zero distributions first
+    has_data = False
+    for metrics in metrics_list:
+        if np.any(metrics['distribution']):
+            has_data = True
+            break
+            
+    if not has_data:
+        ax.text(0.5, 0.5, "No traffic (all guardrails disabled)", 
+                ha='center', va='center', transform=ax.transAxes)
+        if title: ax.set_title(title)
+        if xlabel: ax.set_xlabel(xlabel)
+        ax.set_ylabel('Density')
+        return
+    
+    colors = ['#8B5CF6', '#2DD4BF']  # Purple and teal for input/output
+    line_colors = ['#6D28D9', '#0D9488']
+    
+    for i, metrics in enumerate(metrics_list):
+        if not np.any(metrics['distribution']):
+            continue
+            
+        data = metrics['distribution']
+        kde = gaussian_kde(data)
         x_range = np.linspace(min(data), max(data), 200)
-        ax.plot(x_range, kde(x_range), color=line_color, lw=2, alpha=alpha, label=label)
-        ax.fill_between(x_range, kde(x_range), alpha=fill_alpha, color=color)
         
-    def add_vertical_line(x, color, style, label, alpha=0.7, ax=None):
-        if ax is None:
-            ax = plt.gca()
-        ax.axvline(x=x, color=color, linestyle=style, alpha=alpha, label=label)
+        label = labels[i] if labels else f'Distribution {i+1}'
         
-    def calculate_percent_over_limit(data, limit):
-        return (np.sum(data > limit) / len(data)) * 100
-
-    # Initialize figure to handle default case
-    fig = None
-
-    try:
-        if plot_type == 'traffic':
-            fig, ax = plt.subplots(figsize=(12, 6))
-            ax.set_title('User Traffic Distribution')
-            ax.set_xlabel('Requests per Second')
-            ax.set_ylabel('Density')
-            
-            kde = gaussian_kde(traffic)
-            plot_distribution(traffic, kde, label='User Traffic Distribution', ax=ax)
-            add_vertical_line(
-                simulator.mean_turns_per_second, 
-                'g', '--', 
-                f'Mean: {simulator.mean_turns_per_second:.2f}',
-                ax=ax
-            )
-            
-            ax.set_ylim(bottom=0)
-            ax.legend(loc='upper right', framealpha=0.9)
-            
-        elif plot_type == 'llm':
-            fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 10), height_ratios=[1, 1])
-            fig.suptitle('LLM Traffic Distribution')
-
-            llm_traffic = traffic * simulator.config.calls_per_turn
-            input_token_traffic = llm_traffic * simulator.config.input_tokens_per_message
-
-            # Top plot - Request Distribution
-            ax1.set_xlabel('Requests per Second')
-            ax1.set_ylabel('Request Density')
-
-            kde_llm = gaussian_kde(llm_traffic)
-            x_range = np.linspace(min(llm_traffic), max(llm_traffic), 200)
-
-            ax1.hist(llm_traffic, bins=50, density=True, alpha=0.7, color='skyblue')
-            ax1.plot(x_range, kde_llm(x_range), color='r', lw=2, label='Requests Traffic Distribution')
-
-            # Calculate and display percentage over limit
-            pct_over_req = calculate_percent_over_limit(llm_traffic, simulator.max_requests_per_second)
-            ax1.text(0.02, 0.98, f'Requests over limit: {pct_over_req:.1f}%',
-                    transform=ax1.transAxes, verticalalignment='top',
-                    bbox=dict(facecolor='white', alpha=0.8))
-
-            ax1.axvline(x=simulator.mean_requests_per_second, color='g', linestyle='--',
-                        label=f'Request Mean: {simulator.mean_requests_per_second:.2f}')
-            ax1.axvline(x=simulator.max_requests_per_second, color='orange', linestyle='-',
-                        label=f'Request Rate Limit: {simulator.max_requests_per_second:.2f}')
-
-            ax1.set_ylim(bottom=0)
-            ax1.legend(loc='upper right', framealpha=0.9)
-
-            # Bottom plot - Input Token Distribution
-            ax2.set_xlabel('Input Tokens per Second')
-            ax2.set_ylabel('Input Token Density')
-
-            kde_tokens = gaussian_kde(input_token_traffic)
-            token_range = np.linspace(min(input_token_traffic), max(input_token_traffic), 200)
-
-            ax2.hist(input_token_traffic, bins=50, density=True, alpha=0.7, color='lavender')
-            ax2.plot(token_range, kde_tokens(token_range), color='purple', lw=2, 
-                    label='Input Token Traffic Distribution')
-
-            # Calculate and display percentage over limit
-            pct_over_token = calculate_percent_over_limit(input_token_traffic, simulator.max_input_tokens_per_second)
-            ax2.text(0.02, 0.98, f'Input tokens over limit: {pct_over_token:.1f}%',
-                    transform=ax2.transAxes, verticalalignment='top',
-                    bbox=dict(facecolor='white', alpha=0.8))
-
-            input_token_mean = simulator.mean_requests_per_second * simulator.config.input_tokens_per_message
-            
-            ax2.axvline(x=input_token_mean, color='purple', linestyle='--',
-                        label=f'Input Token Mean: {input_token_mean:.0f}')
-            ax2.axvline(x=simulator.max_input_tokens_per_second, color='pink', linestyle='-',
-                        label=f'Input Token Rate Limit: {simulator.max_input_tokens_per_second:.0f}')
-
-            ax2.set_ylim(bottom=0)
-            ax2.legend(loc='upper right', framealpha=0.9)
-
-            plt.tight_layout()
-            
-        elif plot_type == 'guardrails':
-            # Create two subplots: one for text units, one for requests
-            fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 10))
-            
-            # Calculate traffic for text units
-            input_traffic = np.zeros_like(traffic)
-            if simulator.config.content_filter_enabled:
-                input_traffic += traffic * simulator.config.input_guardrail_text_units
-            if simulator.config.denied_topics_enabled:
-                input_traffic += traffic * simulator.config.input_guardrail_text_units  
-            if simulator.config.pii_filter_enabled:
-                input_traffic += traffic * simulator.config.input_guardrail_text_units
-
-            output_traffic = np.zeros_like(traffic)
-            if simulator.config.contextual_grounding_enabled:
-                output_traffic = traffic * simulator.config.output_guardrail_text_units
-            total_traffic = input_traffic + output_traffic
-            
-            # Text Units Distribution (top plot)
-            ax1.set_title('Text Units Distribution')
-            ax1.set_xlabel('Text Units per Second')
-            ax1.set_ylabel('Density')
-            
-            # Only calculate KDE if we have non-zero data
-            if np.any(input_traffic):
-                kde_input = gaussian_kde(input_traffic)
-            if np.any(output_traffic):
-                kde_output = gaussian_kde(output_traffic)
-            
-            input_mean = simulator.mean_turns_per_second * simulator.config.input_guardrail_text_units
-            output_mean = simulator.mean_turns_per_second * simulator.config.output_guardrail_text_units
-            
-            input_limit = simulator.config.input_guardrail_limit
-            output_limit = simulator.config.contextual_grounding_limit
-            
-            # Calculate percentages over limits for text units if we have data
-            if np.any(input_traffic):
-                pct_over_input = calculate_percent_over_limit(input_traffic, input_limit)
-                ax1.text(0.02, 0.93, f'Input over limit: {pct_over_input:.1f}%',
-                        transform=ax1.transAxes, verticalalignment='top',
-                        bbox=dict(facecolor='white', alpha=0.8))
-                        
-            if np.any(output_traffic):
-                pct_over_output = calculate_percent_over_limit(output_traffic, output_limit)
-                ax1.text(0.02, 0.88, f'Output over limit: {pct_over_output:.1f}%',
-                        transform=ax1.transAxes, verticalalignment='top',
-                        bbox=dict(facecolor='white', alpha=0.8))
-            
-            # Plot distributions only if we have data
-            if np.any(input_traffic):
-                ax1.hist(input_traffic, bins=50, density=True, alpha=0.7, color='#8B5CF6')
-                x_range = np.linspace(min(input_traffic), max(input_traffic), 200)
-                ax1.plot(x_range, kde_input(x_range), color='#6D28D9', lw=2, label='Input Text Units')
-                ax1.axvline(x=input_mean, color='#6D28D9', linestyle='--', 
-                          label=f'Input Mean: {input_mean:.2f}')
-                ax1.axvline(x=input_limit, color='#4C1D95', linestyle='-',
-                          label=f'Input Limit: {input_limit}')
-                
-            if np.any(output_traffic):
-                ax1.hist(output_traffic, bins=50, density=True, alpha=0.7, color='#2DD4BF')
-                x_range = np.linspace(min(output_traffic), max(output_traffic), 200)
-                ax1.plot(x_range, kde_output(x_range), color='#0D9488', lw=2, label='Output Text Units')
-                ax1.axvline(x=output_mean, color='#0D9488', linestyle='--',
-                          label=f'Output Mean: {output_mean:.2f}')
-                ax1.axvline(x=output_limit, color='#134E4A', linestyle='-',
-                          label=f'Output Limit: {output_limit}')
-                
-            ax1.set_ylim(bottom=0)
-            ax1.legend(loc='upper right', framealpha=0.9)
-            
-            # Requests Distribution (bottom plot)
-            ax2.set_title('Requests Distribution')
-            ax2.set_xlabel('Requests per Second')
-            ax2.set_ylabel('Density')
-            
-            # Plot request distribution
-            kde_requests = gaussian_kde(traffic)
-            plot_distribution(traffic, kde_requests, color='#94A3B8', line_color='#64748B',
-                            label='Request Distribution', ax=ax2)
-            
-            request_mean = simulator.mean_turns_per_second
-            request_limit = simulator.config.apply_guardrail_per_second_limit
-            
-            # Calculate percentage over limit for requests
-            pct_over_requests = calculate_percent_over_limit(traffic, request_limit)
-            
-            # Add text for percentage on requests plot
-            ax2.text(0.02, 0.98, f'Requests over limit: {pct_over_requests:.1f}%',
-                    transform=ax2.transAxes, verticalalignment='top',
-                    bbox=dict(facecolor='white', alpha=0.8))
-            
-            # Add mean and limit lines for requests
-            add_vertical_line(request_mean, '#64748B', '--', 
-                            f'Request Mean: {request_mean:.2f}', ax=ax2)
-            add_vertical_line(request_limit, '#475569', '-',
-                            f'Request Limit: {request_limit}', ax=ax2)
-            
-            ax2.set_ylim(bottom=0)
-            ax2.legend(loc='upper right', framealpha=0.9)
-            
-            plt.tight_layout()
-        else:
-            # Handle unknown plot type
-            fig, ax = plt.subplots(figsize=(12, 6))
-            ax.text(0.5, 0.5, f'Unknown plot type: {plot_type}', ha='center', va='center')
-            
-    except Exception as e:
-        # Create an error figure if something goes wrong
-        fig, ax = plt.subplots(figsize=(12, 6))
-        ax.text(0.5, 0.5, f'Error creating plot: {str(e)}', ha='center', va='center')
+        # Plot histogram and KDE
+        ax.hist(data, bins=50, density=True, alpha=0.7, color=colors[i])
+        ax.plot(x_range, kde(x_range), color=line_colors[i], lw=2, 
+                label=f'{label} Distribution')
         
+        # Add mean line
+        if metrics['mean'] is not None:
+            ax.axvline(x=metrics['mean'], color=line_colors[i], linestyle='--',
+                      label=f'{label} Mean: {metrics["mean"]:.2f}')
+        
+        # Add limit line
+        if metrics['limit'] is not None:
+            ax.axvline(x=metrics['limit'], color=line_colors[i], linestyle='-',
+                      label=f'{label} Limit: {metrics["limit"]}')
+            
+            # Calculate and show percentage over limit
+            pct_over = (np.sum(data > metrics['limit']) / len(data)) * 100
+            y_pos = 0.98 - (i * 0.05)  # Stagger text vertically
+            ax.text(0.02, y_pos, f'{label} over limit: {pct_over:.1f}%',
+                    transform=ax.transAxes, verticalalignment='top',
+                    bbox=dict(facecolor='white', alpha=0.8))
+    
+    if title: ax.set_title(title)
+    if xlabel: ax.set_xlabel(xlabel)
+    ax.set_ylabel('Density')
+    ax.legend(loc='upper right', framealpha=0.9)
+
+@matplotlib2fasthtml
+def create_traffic_plot(simulator: LLMTrafficSimulator, plot_type: str = 'traffic'):
+    fig = plt.figure(figsize=(12, 6))
+    
+    if plot_type == 'traffic':
+        metrics = simulator.get_traffic_metrics('conversation')
+        ax = fig.add_subplot(111)
+        plot_distribution(metrics['distribution'], ax, 
+                         mean=metrics['mean'],
+                         title='User Traffic Distribution',
+                         xlabel='Conversations per Second')
+        
+    elif plot_type == 'llm':
+        metrics = simulator.get_traffic_metrics()
+        fig.set_size_inches(12, 10)
+        
+        # Requests plot
+        ax1 = fig.add_subplot(211)
+        plot_distribution(metrics['llm_requests']['distribution'], ax1,
+                         mean=metrics['llm_requests']['mean'],
+                         limit=metrics['llm_requests']['limit'],
+                         title='LLM Request Distribution',
+                         xlabel='Requests per Second')
+        
+        # Tokens plot
+        ax2 = fig.add_subplot(212)
+        plot_distribution(metrics['input_tokens']['distribution'], ax2,
+                         mean=metrics['input_tokens']['mean'],
+                         limit=metrics['input_tokens']['limit'],
+                         title='Input Token Distribution',
+                         xlabel='Input Tokens per Second')
+        
+    elif plot_type == 'guardrails':
+        metrics = simulator.get_traffic_metrics()
+        fig.set_size_inches(12, 10)
+        
+        # Text units plot
+        ax1 = fig.add_subplot(211)
+        plot_multiple_distributions(
+            [metrics['guardrails']['input'], metrics['guardrails']['output']],
+            ax1, labels=['Input', 'Output'],
+            title='Text Units Distribution',
+            xlabel='Text Units per Second'
+        )
+        
+        # Requests plot
+        ax2 = fig.add_subplot(212)
+        plot_distribution(
+            metrics['guardrails']['requests']['distribution'],
+            ax2,
+            mean=metrics['guardrails']['requests']['mean'],
+            limit=metrics['guardrails']['requests']['limit'],
+            title='Guardrails Request Distribution',
+            xlabel='Requests per Second'
+        )
+    
+    plt.tight_layout()
     return fig
+
+def plot_distribution(data, ax, mean=None, limit=None, title=None, xlabel=None):
+    """Helper function to plot a single distribution with KDE"""
+    kde = gaussian_kde(data)
+    x_range = np.linspace(min(data), max(data), 200)
+    
+    ax.hist(data, bins=50, density=True, alpha=0.7, color='skyblue')
+    ax.plot(x_range, kde(x_range), color='r', lw=2, label='Distribution')
+    
+    if mean is not None:
+        ax.axvline(x=mean, color='g', linestyle='--', label=f'Mean: {mean:.2f}')
+    if limit is not None:
+        ax.axvline(x=limit, color='orange', linestyle='-', label=f'Limit: {limit:.2f}')
+        pct_over = (np.sum(data > limit) / len(data)) * 100
+        ax.text(0.02, 0.98, f'Over limit: {pct_over:.1f}%',
+                transform=ax.transAxes, verticalalignment='top',
+                bbox=dict(facecolor='white', alpha=0.8))
+    
+    if title: ax.set_title(title)
+    if xlabel: ax.set_xlabel(xlabel)
+    ax.set_ylabel('Density')
+    ax.legend(loc='upper right')
 
 def create_metrics_grid(analysis: dict, metrics_type: str = 'traffic', config=None):
     metrics = []
     
     # Always show weekly requests
     metrics.append(
-        Card(P(f"{analysis['weekly_requests']:,.0f}", cls="text-2xl font-bold"), 
-            header=H3("Weekly Requests", cls="text-base")),
+        Card(P(f"{analysis['weekly_conversations']:,.0f}", cls="text-2xl font-bold"), 
+            header=H3("Weekly Conversations", cls="text-base")),
     )
     
     if metrics_type == 'llm':
@@ -495,7 +482,7 @@ def create_metrics_grid(analysis: dict, metrics_type: str = 'traffic', config=No
         ])
     elif metrics_type == 'guardrails':
         metrics.extend([
-            Card(P(f"{analysis['weekly_requests']:,.0f}", cls="text-2xl font-bold"), 
+            Card(P(f"{analysis['weekly_guardrails_requests']:,.0f}", cls="text-2xl font-bold"), 
                 header=H3("Weekly Guardrails Requests", cls="text-base")),
             Card(P(f"${analysis['weekly_guardrails_cost']:,.2f}", cls="text-2xl font-bold"), 
                  header=H3("Weekly Guardrails Cost", cls="text-base")),
@@ -597,12 +584,12 @@ app, rt = fast_app(hdrs=(
 def run_simulation(state):
     state.simulator = LLMTrafficSimulator(state.config)
     state.traffic = state.simulator.generate_traffic()
-    state.analysis = state.simulator.analyze_traffic(state.traffic)
+    state.analysis = state.simulator.analyze_traffic()
 
 def get_results_content(state, tab_type: str = 'traffic'):
     return Div(
         create_metrics_grid(state.analysis, tab_type, state.config),
-        Div(create_traffic_plot(state.simulator, state.traffic, tab_type)),
+        Div(create_traffic_plot(state.simulator, tab_type)),
         id="results"
     )
     
@@ -629,7 +616,7 @@ def guardrails_tab(state):
             create_tab_controls(state, 'guardrails'),
             Div(
                 create_metrics_grid(state.analysis, 'guardrails', state.config),
-                Div(create_traffic_plot(state.simulator, state.traffic, 'guardrails')),
+                Div(create_traffic_plot(state.simulator, 'guardrails')),
                 id="results"
             ),
             id="guardrails-content"
