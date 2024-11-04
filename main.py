@@ -174,7 +174,7 @@ class LLMTrafficSimulator:
 
     def analyze_traffic(self, distribution):
         weekly_requests = np.mean(distribution) * (7 * 24 * 60 * 60)
-        weekly_llm_requests = weekly_requests * self.config.calls_per_turn
+        weekly_llm_requests = weekly_requests * self.config.calls_per_turn * self.config.human_turns_per_conversation
         llm_cost = self._calculate_costs(weekly_llm_requests)
         text_units = self._calculate_text_units(weekly_requests)
         guardrails_cost, guardrails_breakdown = self._calculate_guardrails_costs(weekly_requests)
