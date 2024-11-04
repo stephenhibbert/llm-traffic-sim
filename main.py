@@ -240,6 +240,7 @@ def create_control_input(name: str, min_val: float, max_val: float,
                 min=str(min_val), max=str(max_val), value=str(default_val), step=str(step),
                 style="width: 100%",
                 hx_post="/update", hx_target="#results",
+                hx_indicator="body",
                 hx_trigger="change, input delay:500ms",
                 hx_include="form",
                 oninput=f"document.getElementById('{name}-number').value = this.value"
@@ -250,6 +251,7 @@ def create_control_input(name: str, min_val: float, max_val: float,
                 style="width: 200px; margin-left: 10px",
                 hx_post="/update", hx_target="#results",
                 hx_trigger="change, input delay:500ms",
+                hx_indicator="body",
                 hx_include="form",
                 oninput=f"document.getElementById('{name}-slider').value = this.value"
             ),
@@ -570,7 +572,26 @@ def create_tab_controls(state, tab_type: str):
 # FastHTML App Setup
 app, rt = fast_app(hdrs=(
     franken.Theme.orange.headers(),
-    Script(defer=True, src="https://cdn.tailwindcss.com")
+    Script(defer=True, src="https://cdn.tailwindcss.com"),
+    Style("""
+        .htmx-request #spinner {
+            display: flex !important;
+        }
+        
+        .spinner {
+            border: 4px solid rgba(255, 255, 255, 0.3);
+            border-radius: 50%;
+            border-top: 4px solid #fff;
+            width: 40px;
+            height: 40px;
+            animation: spin 1s linear infinite;
+        }
+        
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+    """)
 ))
 
 def run_simulation(state):
@@ -584,6 +605,7 @@ def get_results_content(state, tab_type: str = 'traffic'):
         Div(create_traffic_plot(state.simulator, state.traffic, tab_type)),
         id="results"
     )
+    
 
 def traffic_tab(state):
     return Card(
@@ -694,6 +716,18 @@ def get(session):
                 ),
                 cls="not-prose w-full mb-4"
             ),
+                Div(
+        # Semi-transparent dark backdrop with blur
+        Div(cls="fixed inset-0 bg-gray-900/50 backdrop-blur-sm z-40 transition-opacity duration-200"),
+        # Centered loading spinner and text
+        Div(
+            Div(cls="spinner"),
+            P("Running simulation...", cls="text-white mt-4 text-xl"),
+            cls="fixed top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 z-50 flex flex-col items-center"
+        ),
+        id="spinner",
+        cls="htmx-indicator fixed inset-0 hidden"  # Hidden by default
+    ),
         Div(
             Div(cls="flex border-b border-gray-200")(
                 A("Traffic", cls="px-4 py-2 hover:bg-gray-100", 
@@ -703,10 +737,9 @@ def get(session):
                 A("Guardrails", cls="px-4 py-2 hover:bg-gray-100",
                   hx_get="/guardrails", hx_target="#tab-content"),
             ),
-            Div(traffic_tab(state), id="tab-content", cls="mt-4")
+            Div(traffic_tab(state), id="tab-content", cls="mt-4"),
         )
     )
-    
     return content
 
 @rt("/traffic")
