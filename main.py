@@ -174,18 +174,61 @@ class LLMTrafficSimulator:
             }.items()
         }
 
+    import numpy as np
+
     def generate_traffic_distribution(self, base_traffic, multiplier=1):
-        """Generate a traffic distribution with the configured variance"""
+        """Generate a realistic UK traffic distribution with daily and weekly patterns
+        while maintaining the correct mean
+        
+        Args:
+            base_traffic (float): Base traffic level
+            multiplier (float): Overall traffic multiplier
+            
+        Returns:
+            numpy.ndarray: Array of traffic values following UK patterns
+        """
         scaled_traffic = base_traffic * multiplier
-        return np.random.normal(
+        samples = int(self.config.distribution_samples)
+        
+        # Generate base distribution
+        traffic = np.random.normal(
             scaled_traffic,
             scaled_traffic * self.config.distribution_variance,
-            int(self.config.distribution_samples)
+            samples
         )
-
-    def generate_traffic(self):
-        """Backward compatibility method"""
-        return self.traffic
+        
+        # Apply time-of-day factors (UK business hours)
+        hour_factors = np.array([
+            0.1, 0.1, 0.1, 0.1, 0.1, 0.2,  # 00-05: Very low night traffic
+            0.3, 0.6, 0.9, 1.2, 1.3, 1.2,  # 06-11: Morning ramp-up
+            1.1, 1.0, 1.1, 1.2, 1.3, 1.2,  # 12-17: Business hours peak
+            1.0, 0.8, 0.6, 0.4, 0.2, 0.1   # 18-23: Evening wind-down
+        ])
+        
+        # Normalize hourly factors to maintain mean
+        hour_factors = hour_factors / np.mean(hour_factors)
+        
+        # Apply weekly pattern (UK work week)
+        day_factors = np.array([
+            0.7,   # Sunday
+            1.0,   # Monday
+            1.1,   # Tuesday
+            1.1,   # Wednesday
+            1.0,   # Thursday
+            0.9,   # Friday
+            0.6    # Saturday
+        ])
+        
+        # Normalize daily factors to maintain mean
+        day_factors = day_factors / np.mean(day_factors)
+        
+        # Apply hourly and daily patterns
+        hours = np.arange(samples) % 24
+        days = (np.arange(samples) // 24) % 7
+        
+        traffic = traffic * hour_factors[hours] * day_factors[days]
+        
+        return np.maximum(traffic, 0)  # Ensure no negative traffic
     
     def get_traffic_metrics(self, traffic_type='all'):
         """Get all traffic metrics for plotting"""
@@ -353,7 +396,7 @@ def plot_multiple_distributions(metrics_list, ax, labels=None, title=None, xlabe
         label = labels[i] if labels else f'Distribution {i+1}'
         
         # Plot histogram and KDE
-        ax.hist(data, bins=50, density=True, alpha=0.7, color=colors[i])
+        ax.hist(data, bins=150, density=True, alpha=0.7, color=colors[i])
         ax.plot(x_range, kde(x_range), color=line_colors[i], lw=2, 
                 label=f'{label} Distribution')
         
@@ -443,7 +486,7 @@ def plot_distribution(data, ax, mean=None, limit=None, title=None, xlabel=None):
     kde = gaussian_kde(data)
     x_range = np.linspace(min(data), max(data), 200)
     
-    ax.hist(data, bins=50, density=True, alpha=0.7, color='skyblue')
+    ax.hist(data, bins=150, density=True, alpha=0.7, color='skyblue')
     ax.plot(x_range, kde(x_range), color='r', lw=2, label='Distribution')
     
     if mean is not None:
@@ -583,7 +626,6 @@ app, rt = fast_app(hdrs=(
 
 def run_simulation(state):
     state.simulator = LLMTrafficSimulator(state.config)
-    state.traffic = state.simulator.generate_traffic()
     state.analysis = state.simulator.analyze_traffic()
 
 def get_results_content(state, tab_type: str = 'traffic'):
